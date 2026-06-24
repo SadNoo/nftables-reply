@@ -73,7 +73,7 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/SadNoo/nftables-reply/m
 ```text
 你要做什么呢（请输入数字）？Ctrl+C 退出本脚本
 1）增加转发规则              3）列出所有转发规则
-2）删除转发规则              4）查看当前nftables配置
+2）删除转发规则              4）查看本地规则配置
 5）编辑本地配置              6）转发诊断
 #?
 ```

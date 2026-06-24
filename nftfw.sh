@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-APP_NAME="nftfw"
 CONFIG_DIR="${NFWD_CONFIG_DIR:-/etc/nft-forward-manager}"
 CONFIG_FILE="${NFWD_CONFIG_FILE:-$CONFIG_DIR/rules.conf}"
 SYSCTL_FILE="${NFWD_SYSCTL_FILE:-/etc/sysctl.d/99-nft-forward-manager.conf}"
-NFT_BIN="${NFWD_NFT_BIN:-/usr/sbin/nft}"
+NFT_BIN="${NFWD_NFT_BIN:-$(command -v nft 2>/dev/null || printf '/usr/sbin/nft')}"
 NFT_TABLE="${NFWD_NFT_TABLE:-nfwd_nat}"
 MANAGER_BIN="${NFWD_MANAGER_BIN:-/usr/local/sbin/nftfw}"
 SERVICE_NAME="${NFWD_SERVICE_NAME:-nftfw-restore.service}"
@@ -15,11 +14,6 @@ red() { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 info() { printf '%s\n' "$*"; }
-
-pause() {
-  printf '\n按回车返回上一级...'
-  read -r _
-}
 
 die() {
   red "错误：$*"
@@ -177,7 +171,7 @@ is_ipv4_literal() {
 is_ipv6_literal() {
   local host
   host="$(strip_ipv6_brackets "$1")"
-  [[ "$host" == *:* ]]
+  [[ "$host" == *:* && "$host" =~ ^[0-9A-Fa-f:.]+$ ]]
 }
 
 resolve_ipv4() {
@@ -198,6 +192,10 @@ resolve_ipv6() {
   host="$(strip_ipv6_brackets "$1")"
 
   if is_ipv6_literal "$host"; then
+    if command -v getent >/dev/null 2>&1; then
+      getent ahostsv6 "$host" | awk '$1 ~ /:/ { print $1; exit }'
+      return 0
+    fi
     printf '%s\n' "$host"
     return 0
   fi
@@ -231,7 +229,7 @@ protocols_for_rule() {
 
 generate_nft_script() {
   local table_name="${1:-$NFT_TABLE}"
-  local line proto local_port remote_addr remote_port snat comment family target_ip p safe_comment target
+  local line proto local_port remote_addr remote_port snat comment family target_ip p safe_comment target targets
 
   cat <<EOF
 #!/usr/sbin/nft -f
@@ -263,7 +261,8 @@ EOF
       continue
     fi
 
-    if [[ -z "$(resolve_targets "$remote_addr" || true)" ]]; then
+    targets="$(resolve_targets "$remote_addr" || true)"
+    if [[ -z "$targets" ]]; then
       yellow "跳过无法解析的远程地址：$remote_addr" >&2
       continue
     fi
@@ -286,13 +285,16 @@ EOF
             "$family" "$table_name" "$family" "$target_ip" "$p" "$remote_port" "$safe_comment"
         fi
       done < <(protocols_for_rule "$proto")
-    done < <(resolve_targets "$remote_addr")
+    done <<<"$targets"
     printf '\n'
   done <"$CONFIG_FILE"
 }
 
 apply_config() {
   local tmp check_tmp check_table
+
+  validate_config_syntax "$CONFIG_FILE" || return 1
+
   tmp="$(mktemp)"
   check_tmp="$(mktemp)"
   check_table="${NFT_TABLE}_check_$$"
@@ -640,7 +642,7 @@ menu() {
     printf '\n'
     info "你要做什么呢（请输入数字）？Ctrl+C 退出本脚本"
     info "1）增加转发规则              3）列出所有转发规则"
-    info "2）删除转发规则              4）查看当前nftables配置"
+    info "2）删除转发规则              4）查看本地规则配置"
     info "5）编辑本地配置              6）转发诊断"
     read -rp "#? " choice
 

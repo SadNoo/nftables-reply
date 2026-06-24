@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 CONFIG_DIR="${NFWD_CONFIG_DIR:-/etc/nft-forward-manager}"
 SYSCTL_FILE="${NFWD_SYSCTL_FILE:-/etc/sysctl.d/99-nft-forward-manager.conf}"
-NFT_BIN="${NFWD_NFT_BIN:-/usr/sbin/nft}"
+NFT_BIN="${NFWD_NFT_BIN:-$(command -v nft 2>/dev/null || printf '/usr/sbin/nft')}"
 NFT_TABLE="${NFWD_NFT_TABLE:-nfwd_nat}"
 MANAGER_BIN="${NFWD_MANAGER_BIN:-/usr/local/sbin/nftfw}"
 SERVICE_NAME="${NFWD_SERVICE_NAME:-nftfw-restore.service}"
