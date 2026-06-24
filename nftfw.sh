@@ -433,7 +433,7 @@ delete_by_port() {
 }
 
 add_rule() {
-  local local_port remote_port remote_addr comment line snat_choice snat
+  local local_port remote_port remote_addr line
 
   clear || true
   info "增加规则"
@@ -452,19 +452,12 @@ add_rule() {
   read -rp "请输入远程地址: " remote_addr
   [[ -n "$(resolve_targets "$remote_addr" || true)" ]] || { red "远程地址无法解析为 IPv4/IPv6"; return; }
 
-  read -rp "请输入备注（可留空）: " comment
-  read -rp "是否开启 SNAT？[Y/n]: " snat_choice
-  case "${snat_choice,,}" in
-    n|no) snat="off" ;;
-    *) snat="on" ;;
-  esac
-
   if local_port_exists "$local_port"; then
     yellow "本地端口 $local_port 已存在，将覆盖旧配置。"
     delete_by_port "$local_port" local || true
   fi
 
-  line="all|$local_port|$remote_addr|$remote_port|$snat|$comment"
+  line="all|$local_port|$remote_addr|$remote_port|on|"
   printf '%s\n' "$line" >>"$CONFIG_FILE"
 
   if apply_config; then
@@ -503,13 +496,28 @@ remove_rule() {
 }
 
 list_forward_rules() {
+  local line proto local_port remote_addr remote_port snat comment idx=0
+
   info "所有转发规则"
   printf '\n'
-  nl -ba "$CONFIG_FILE"
+  printf '%-4s %-5s %-18s %-40s %-18s %-6s\n' "序号" "协议" "本地端口" "远程地址" "远程端口" "SNAT"
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "${line//[[:space:]]/}" || "$line" =~ ^[[:space:]]*# ]] && continue
+    IFS='|' read -r proto local_port remote_addr remote_port snat comment <<<"$line"
+    proto="${proto:-all}"
+    snat="${snat:-on}"
+    idx=$((idx + 1))
+    printf '%-4s %-5s %-18s %-40s %-18s %-6s\n' "$idx" "$proto" "$local_port" "$remote_addr" "$remote_port" "$snat"
+  done <"$CONFIG_FILE"
+
+  if (( idx == 0 )); then
+    yellow "暂无转发规则。"
+  fi
 }
 
 show_current_nftables_config() {
-  info "当前nftables配置（可复制后粘贴到第5项导入）"
+  info "当前本地配置（可复制后粘贴到第5项导入）"
   printf '\n'
   cat "$CONFIG_FILE"
 }

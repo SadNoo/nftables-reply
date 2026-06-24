@@ -59,8 +59,8 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/SadNoo/nftables-reply/m
 
 - 增加规则
 - 删减规则
-- 列出所有转发规则
-- 查看当前 nftables 配置
+- 简洁列出所有转发规则
+- 查看当前本地配置，可直接复制
 - 编辑本地配置并导入
 - 开机自动恢复转发规则
 - 支持 IPv4、IPv6、域名 A/AAAA 记录解析
@@ -78,13 +78,21 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/SadNoo/nftables-reply/m
 #?
 ```
 
-第 4 项输出的是可复制的本地配置内容。复制后可以进入第 5 项直接粘贴导入，最后单独输入一行：
+第 3 项会以表格方式简洁展示当前规则。第 4 项会 `cat` 原始本地配置，复制后可以进入第 5 项直接粘贴导入，最后单独输入一行：
 
 ```text
 EOF
 ```
 
 脚本会先校验导入内容，校验通过才会覆盖原配置并立即应用；校验失败会保留原配置。
+
+新增规则只需要输入本地端口、远程端口和远程地址。脚本默认使用：
+
+```text
+protocol=all
+snat=on
+comment=
+```
 
 ## 重要说明
 
