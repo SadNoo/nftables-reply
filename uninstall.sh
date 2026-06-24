@@ -77,6 +77,14 @@ remove_manager_bin() {
 }
 
 remove_config() {
+  case "$CONFIG_DIR" in
+    /etc/nft-forward-manager|/etc/nft-forward-manager/*) ;;
+    *)
+      yellow "配置目录不在安全范围内，跳过删除：$CONFIG_DIR"
+      return
+      ;;
+  esac
+
   if [[ -d "$CONFIG_DIR" ]]; then
     rm -rf "$CONFIG_DIR"
     green "已删除配置目录：$CONFIG_DIR"

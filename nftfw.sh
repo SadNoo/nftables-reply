@@ -314,7 +314,10 @@ apply_config() {
     "$NFT_BIN" delete table ip6 "$NFT_TABLE"
   fi
 
-  "$NFT_BIN" -f "$tmp"
+  if ! "$NFT_BIN" -f "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
   rm -f "$tmp"
 }
 
@@ -435,7 +438,7 @@ delete_by_port() {
 }
 
 add_rule() {
-  local local_port remote_port remote_addr line
+  local local_port remote_port remote_addr line backup
 
   clear || true
   info "增加规则"
@@ -454,6 +457,9 @@ add_rule() {
   read -rp "请输入远程地址: " remote_addr
   [[ -n "$(resolve_targets "$remote_addr" || true)" ]] || { red "远程地址无法解析为 IPv4/IPv6"; return; }
 
+  backup="$(mktemp)"
+  cp "$CONFIG_FILE" "$backup"
+
   if local_port_exists "$local_port"; then
     yellow "本地端口 $local_port 已存在，将覆盖旧配置。"
     delete_by_port "$local_port" local || true
@@ -465,12 +471,15 @@ add_rule() {
   if apply_config; then
     green "添加成功，已应用 nftables 规则。"
   else
-    red "配置已写入，但应用 nftables 失败，请检查配置。"
+    mv "$backup" "$CONFIG_FILE"
+    apply_config >/dev/null 2>&1 || true
+    red "添加失败，已恢复原配置。请检查 nftables 或目标配置。"
   fi
+  rm -f "$backup"
 }
 
 remove_rule() {
-  local port
+  local port backup
   clear || true
   info "删减规则"
   info "请输入要删除的本地端口，也就是客户端访问中转机 A 的对外端口。"
@@ -480,21 +489,29 @@ remove_rule() {
   read -rp "请输入端口: " port
   valid_port_token "$port" || { red "端口格式无效"; return; }
 
+  backup="$(mktemp)"
+  cp "$CONFIG_FILE" "$backup"
+
   if delete_by_port "$port" local; then
     if apply_config; then
       green "删除成功，本地端口 $port 的规则已移除并重新应用。"
     else
-      red "本地配置已删除，但重新应用 nftables 失败，请手动检查。"
+      mv "$backup" "$CONFIG_FILE"
+      apply_config >/dev/null 2>&1 || true
+      red "删除失败，已恢复原配置。请检查 nftables 或目标配置。"
     fi
   elif delete_by_port "$port" remote; then
     if apply_config; then
       green "删除成功，远程端口 $port 的规则已移除并重新应用。"
     else
-      red "本地配置已删除，但重新应用 nftables 失败，请手动检查。"
+      mv "$backup" "$CONFIG_FILE"
+      apply_config >/dev/null 2>&1 || true
+      red "删除失败，已恢复原配置。请检查 nftables 或目标配置。"
     fi
   else
     yellow "未找到端口 $port 对应的本地配置。"
   fi
+  rm -f "$backup"
 }
 
 list_forward_rules() {
