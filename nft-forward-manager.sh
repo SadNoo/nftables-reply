@@ -7,6 +7,8 @@ CONFIG_FILE="${NFWD_CONFIG_FILE:-$CONFIG_DIR/rules.conf}"
 SYSCTL_FILE="${NFWD_SYSCTL_FILE:-/etc/sysctl.d/99-nft-forward-manager.conf}"
 NFT_BIN="${NFWD_NFT_BIN:-/usr/sbin/nft}"
 NFT_TABLE="${NFWD_NFT_TABLE:-nfwd_nat}"
+MANAGER_BIN="${NFWD_MANAGER_BIN:-/usr/local/sbin/nft-forward-manager}"
+SERVICE_FILE="${NFWD_SERVICE_FILE:-/etc/systemd/system/nft-forward-manager-restore.service}"
 
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -76,6 +78,35 @@ EOF
   fi
 }
 
+install_persistence() {
+  local source_path="${BASH_SOURCE[0]:-}"
+
+  if [[ -n "$source_path" && -r "$source_path" && "$source_path" != "$MANAGER_BIN" ]]; then
+    mkdir -p "$(dirname "$MANAGER_BIN")"
+    cp "$source_path" "$MANAGER_BIN"
+    chmod 0755 "$MANAGER_BIN"
+  fi
+
+  if command -v systemctl >/dev/null 2>&1 && [[ -x "$MANAGER_BIN" ]]; then
+    cat >"$SERVICE_FILE" <<EOF
+[Unit]
+Description=nft-forward-manager restore
+After=network-online.target nftables.service docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$MANAGER_BIN --apply-only
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable nft-forward-manager-restore.service >/dev/null 2>&1 || true
+  fi
+}
+
 enable_forwarding() {
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
   cat >"$SYSCTL_FILE" <<'EOF'
@@ -101,6 +132,13 @@ valid_port_token() {
 validate_protocol() {
   case "$1" in
     tcp|udp|all) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_snat() {
+  case "$1" in
+    on|off|true|false|yes|no|1|0|"") return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -202,6 +240,64 @@ apply_config() {
 
   "$NFT_BIN" -f "$tmp"
   rm -f "$tmp"
+}
+
+validate_config_file() {
+  local file="$1" old_file tmp check_table
+  old_file="$CONFIG_FILE"
+  tmp="$(mktemp)"
+  check_table="${NFT_TABLE}_check_$$"
+
+  validate_config_syntax "$file" || {
+    rm -f "$tmp"
+    return 1
+  }
+
+  CONFIG_FILE="$file"
+  generate_nft_script "$check_table" >"$tmp"
+  CONFIG_FILE="$old_file"
+
+  if "$NFT_BIN" -c -f "$tmp"; then
+    rm -f "$tmp"
+    return 0
+  fi
+
+  rm -f "$tmp"
+  return 1
+}
+
+validate_config_syntax() {
+  local file="$1" line proto local_port remote_addr remote_port snat comment lineno=0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    lineno=$((lineno + 1))
+    [[ -z "${line//[[:space:]]/}" || "$line" =~ ^[[:space:]]*# ]] && continue
+
+    IFS='|' read -r proto local_port remote_addr remote_port snat comment <<<"$line"
+    proto="${proto:-all}"
+    snat="${snat:-on}"
+
+    if [[ -z "${local_port:-}" || -z "${remote_addr:-}" || -z "${remote_port:-}" ]]; then
+      red "第 $lineno 行缺少字段：$line" >&2
+      return 1
+    fi
+    if ! validate_protocol "$proto"; then
+      red "第 $lineno 行协议无效，只支持 tcp/udp/all：$line" >&2
+      return 1
+    fi
+    if ! valid_port_token "$local_port" || ! valid_port_token "$remote_port"; then
+      red "第 $lineno 行端口无效：$line" >&2
+      return 1
+    fi
+    if [[ -z "$(resolve_ipv4 "$remote_addr" || true)" ]]; then
+      red "第 $lineno 行远程地址无法解析为 IPv4：$line" >&2
+      return 1
+    fi
+    if ! validate_snat "$snat"; then
+      red "第 $lineno 行 SNAT 字段无效，只支持 on/off：$line" >&2
+      return 1
+    fi
+  done <"$file"
 }
 
 port_contains() {
@@ -371,8 +467,11 @@ diagnose_forwarding() {
 }
 
 edit_local_config() {
-  local tmp line
+  local tmp backup line
   tmp="$(mktemp)"
+  backup="$(mktemp)"
+  cp "$CONFIG_FILE" "$backup"
+
   info "编辑本地配置"
   info "请直接粘贴完整配置，单独输入 EOF 结束并应用。"
   info "格式：protocol|local_port|remote_addr|remote_port|snat|comment"
@@ -383,12 +482,21 @@ edit_local_config() {
     printf '%s\n' "$line" >>"$tmp"
   done
 
+  if ! validate_config_file "$tmp"; then
+    red "导入配置校验失败，已保留原配置。"
+    rm -f "$tmp" "$backup"
+    return
+  fi
+
   mv "$tmp" "$CONFIG_FILE"
   if apply_config; then
     green "配置已重新应用。"
   else
+    mv "$backup" "$CONFIG_FILE"
+    apply_config >/dev/null 2>&1 || true
     red "配置应用失败，请检查 $CONFIG_FILE。"
   fi
+  rm -f "$backup"
 }
 
 forward_policy_is_drop() {
@@ -459,16 +567,33 @@ menu() {
   done
 }
 
-main() {
+apply_only() {
   require_root
   require_nftables
   init_config
   enable_forwarding
   apply_docker_compat
 
+  apply_config
+}
+
+main() {
+  if [[ "${1:-}" == "--apply-only" ]]; then
+    apply_only
+    exit $?
+  fi
+
+  require_root
+  require_nftables
+  init_config
+  install_persistence
+  enable_forwarding
+  apply_docker_compat
+
   if ! apply_config; then
     yellow "本地配置加载失败，请进入菜单检查配置。"
   fi
+
   menu
 }
 

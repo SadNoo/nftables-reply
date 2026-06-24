@@ -5,6 +5,8 @@ CONFIG_DIR="${NFWD_CONFIG_DIR:-/etc/nft-forward-manager}"
 SYSCTL_FILE="${NFWD_SYSCTL_FILE:-/etc/sysctl.d/99-nft-forward-manager.conf}"
 NFT_BIN="${NFWD_NFT_BIN:-/usr/sbin/nft}"
 NFT_TABLE="${NFWD_NFT_TABLE:-nfwd_nat}"
+MANAGER_BIN="${NFWD_MANAGER_BIN:-/usr/local/sbin/nft-forward-manager}"
+SERVICE_FILE="${NFWD_SERVICE_FILE:-/etc/systemd/system/nft-forward-manager-restore.service}"
 
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -27,6 +29,31 @@ delete_nft_table() {
     green "已删除 nftables 表：ip $NFT_TABLE"
   else
     yellow "未发现 nftables 表：ip $NFT_TABLE"
+  fi
+}
+
+remove_service() {
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now nft-forward-manager-restore.service >/dev/null 2>&1 || true
+  fi
+
+  if [[ -f "$SERVICE_FILE" ]]; then
+    rm -f "$SERVICE_FILE"
+    green "已删除 systemd 服务：$SERVICE_FILE"
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+  else
+    yellow "未发现 systemd 服务：$SERVICE_FILE"
+  fi
+}
+
+remove_manager_bin() {
+  if [[ -f "$MANAGER_BIN" ]]; then
+    rm -f "$MANAGER_BIN"
+    green "已删除脚本文件：$MANAGER_BIN"
+  else
+    yellow "未发现脚本文件：$MANAGER_BIN"
   fi
 }
 
@@ -90,6 +117,8 @@ maybe_restore_forward_policy() {
 
 main() {
   require_root
+  remove_service
+  remove_manager_bin
   delete_nft_table
   remove_config
   remove_sysctl_file

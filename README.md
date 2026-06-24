@@ -16,6 +16,26 @@ apt-get install -y nftables
 systemctl enable --now nftables
 ```
 
+脚本会自动安装到：
+
+```text
+/usr/local/sbin/nft-forward-manager
+```
+
+并创建开机恢复服务：
+
+```text
+/etc/systemd/system/nft-forward-manager-restore.service
+```
+
+服务器重启后会自动执行：
+
+```bash
+/usr/local/sbin/nft-forward-manager --apply-only
+```
+
+从 `/etc/nft-forward-manager/rules.conf` 恢复转发规则。
+
 ## 卸载
 
 ```bash
@@ -24,6 +44,8 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/SadNoo/nftables-reply/m
 
 卸载脚本会删除：
 
+- systemd 服务：`/etc/systemd/system/nft-forward-manager-restore.service`
+- 本地脚本：`/usr/local/sbin/nft-forward-manager`
 - nftables 表：`ip nfwd_nat`
 - 本地配置目录：`/etc/nft-forward-manager`
 - sysctl 配置：`/etc/sysctl.d/99-nft-forward-manager.conf`
@@ -37,6 +59,7 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/SadNoo/nftables-reply/m
 - 列出所有转发规则
 - 查看当前 nftables 配置
 - 编辑本地配置并导入
+- 开机自动恢复转发规则
 - 默认 `snat=on`，优先保证直接可用；需要保留客户端源 IP 时可改为 `off`
 - 检测 Docker/iptables-nft 的 `FORWARD policy drop` 并改为 `policy accept` 以兼容 NAT 转发
 - 转发诊断，查看 `ip_forward`、nftables NAT 表和 counter
@@ -57,7 +80,7 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/SadNoo/nftables-reply/m
 EOF
 ```
 
-脚本会立即应用新配置。
+脚本会先校验导入内容，校验通过才会覆盖原配置并立即应用；校验失败会保留原配置。
 
 ## 重要说明
 
