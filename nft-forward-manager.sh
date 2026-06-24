@@ -360,20 +360,23 @@ forward_policy_is_drop() {
 }
 
 apply_docker_compat_for_family() {
-  local family="$1"
+  local family="$1" tmp
   forward_policy_is_drop "$family" || return 0
 
   yellow "检测到 $family filter FORWARD 为 policy drop，正在添加 Docker/nftables NAT 兼容放行规则。"
+  tmp="$(mktemp)"
+  printf '#!/usr/sbin/nft -f\n' >"$tmp"
 
   if ! chain_has_comment "$family" "nfwd docker compat established"; then
-    "$NFT_BIN" insert rule "$family" filter FORWARD \
-      ct state established,related counter accept comment "nfwd docker compat established" || true
+    printf 'insert rule %s filter FORWARD ct state established,related counter accept comment "nfwd docker compat established"\n' "$family" >>"$tmp"
   fi
 
   if ! chain_has_comment "$family" "nfwd docker compat dnat"; then
-    "$NFT_BIN" insert rule "$family" filter FORWARD \
-      ct status dnat counter accept comment "nfwd docker compat dnat" || true
+    printf 'insert rule %s filter FORWARD ct status dnat counter accept comment "nfwd docker compat dnat"\n' "$family" >>"$tmp"
   fi
+
+  "$NFT_BIN" -f "$tmp" || true
+  rm -f "$tmp"
 }
 
 apply_docker_compat() {
@@ -430,7 +433,6 @@ main() {
   else
     yellow "本地配置加载失败，请进入菜单检查配置。"
   fi
-  check_forward_policy
   sleep 1
   menu
 }
