@@ -227,9 +227,8 @@ protocols_for_rule() {
   esac
 }
 
-generate_nft_script() {
+generate_nft_table_setup_script() {
   local table_name="${1:-$NFT_TABLE}"
-  local line proto local_port remote_addr remote_port snat comment family target_ip p safe_comment target targets
 
   cat <<EOF
 #!/usr/sbin/nft -f
@@ -243,6 +242,11 @@ add chain ip6 $table_name prerouting { type nat hook prerouting priority dstnat;
 add chain ip6 $table_name postrouting { type nat hook postrouting priority srcnat; policy accept; }
 
 EOF
+}
+
+generate_nft_rules() {
+  local table_name="${1:-$NFT_TABLE}"
+  local line proto local_port remote_addr remote_port snat comment family target_ip p safe_comment target targets
 
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -z "${line//[[:space:]]/}" || "$line" =~ ^[[:space:]]*# ]] && continue
@@ -290,6 +294,59 @@ EOF
   done <"$CONFIG_FILE"
 }
 
+generate_nft_script() {
+  local table_name="${1:-$NFT_TABLE}"
+  generate_nft_table_setup_script "$table_name"
+  generate_nft_rules "$table_name"
+}
+
+generate_nft_apply_script() {
+  local table_name="${1:-$NFT_TABLE}"
+
+  cat <<EOF
+#!/usr/sbin/nft -f
+
+flush chain ip $table_name prerouting
+flush chain ip $table_name postrouting
+flush chain ip6 $table_name prerouting
+flush chain ip6 $table_name postrouting
+
+EOF
+
+  generate_nft_rules "$table_name"
+}
+
+ensure_nft_family_table() {
+  local family="$1" table_name="${2:-$NFT_TABLE}" tmp
+
+  if ! "$NFT_BIN" list table "$family" "$table_name" >/dev/null 2>&1; then
+    "$NFT_BIN" add table "$family" "$table_name" || return 1
+  fi
+
+  tmp="$(mktemp)"
+  printf '#!/usr/sbin/nft -f\n' >"$tmp"
+  if ! "$NFT_BIN" list chain "$family" "$table_name" prerouting >/dev/null 2>&1; then
+    printf 'add chain %s %s prerouting { type nat hook prerouting priority dstnat; policy accept; }\n' "$family" "$table_name" >>"$tmp"
+  fi
+  if ! "$NFT_BIN" list chain "$family" "$table_name" postrouting >/dev/null 2>&1; then
+    printf 'add chain %s %s postrouting { type nat hook postrouting priority srcnat; policy accept; }\n' "$family" "$table_name" >>"$tmp"
+  fi
+
+  if [[ "$(wc -l <"$tmp")" -gt 1 ]]; then
+    "$NFT_BIN" -f "$tmp" || {
+      rm -f "$tmp"
+      return 1
+    }
+  fi
+  rm -f "$tmp"
+}
+
+ensure_nft_tables() {
+  local table_name="${1:-$NFT_TABLE}"
+  ensure_nft_family_table ip "$table_name"
+  ensure_nft_family_table ip6 "$table_name"
+}
+
 apply_config() {
   local tmp check_tmp check_table
 
@@ -306,12 +363,16 @@ apply_config() {
   fi
   rm -f "$check_tmp"
 
-  generate_nft_script "$NFT_TABLE" >"$tmp"
-  if "$NFT_BIN" list table ip "$NFT_TABLE" >/dev/null 2>&1; then
-    "$NFT_BIN" delete table ip "$NFT_TABLE"
-  fi
-  if "$NFT_BIN" list table ip6 "$NFT_TABLE" >/dev/null 2>&1; then
-    "$NFT_BIN" delete table ip6 "$NFT_TABLE"
+  ensure_nft_tables "$NFT_TABLE" || {
+    rm -f "$tmp"
+    return 1
+  }
+
+  generate_nft_apply_script "$NFT_TABLE" >"$tmp"
+
+  if ! "$NFT_BIN" -c -f "$tmp"; then
+    rm -f "$tmp"
+    return 1
   fi
 
   if ! "$NFT_BIN" -f "$tmp"; then
