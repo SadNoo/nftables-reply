@@ -8,6 +8,20 @@ Debian 11+ nftables 端口转发交互管理脚本。
 sudo bash <(curl -fsSL https://raw.githubusercontent.com/SadNoo/nftables-reply/main/nft-forward-manager.sh)
 ```
 
+## 卸载
+
+```bash
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/SadNoo/nftables-reply/main/uninstall.sh)
+```
+
+卸载脚本会删除：
+
+- nftables 表：`ip nfwd_nat`
+- 本地配置目录：`/etc/nft-forward-manager`
+- sysctl 配置：`/etc/sysctl.d/99-nft-forward-manager.conf`
+
+卸载时会询问是否把 `ip/ip6 filter FORWARD policy` 改回 `drop`。如果你的服务器还在使用 Docker 或其它转发服务，不确定时建议选择 `n`。
+
 ## 功能
 
 - 增加规则
@@ -17,7 +31,7 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/SadNoo/nftables-reply/m
 - 编辑本地配置
 - 重新应用本地配置
 - 默认 `snat=off`，保留客户端源 IP
-- 检测 Docker/iptables-nft 的 `FORWARD policy drop` 并添加 NAT 转发兼容规则
+- 检测 Docker/iptables-nft 的 `FORWARD policy drop` 并改为 `policy accept` 以兼容 NAT 转发
 
 ## 配置位置
 
