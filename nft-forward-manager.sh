@@ -348,11 +348,6 @@ edit_local_config() {
   pause
 }
 
-chain_has_comment() {
-  local family="$1" text="$2"
-  "$NFT_BIN" list chain "$family" filter FORWARD 2>/dev/null | grep -Fq "$text"
-}
-
 forward_policy_is_drop() {
   local family="$1" chain
   chain="$("$NFT_BIN" list chain "$family" filter FORWARD 2>/dev/null || true)"
@@ -363,18 +358,12 @@ apply_docker_compat_for_family() {
   local family="$1" tmp
   forward_policy_is_drop "$family" || return 0
 
-  yellow "检测到 $family filter FORWARD 为 policy drop，正在添加 Docker/nftables NAT 兼容放行规则。"
+  yellow "检测到 $family filter FORWARD 为 policy drop，正在修改为 policy accept 以兼容 Docker/nftables NAT 转发。"
   tmp="$(mktemp)"
-  printf '#!/usr/sbin/nft -f\n' >"$tmp"
-
-  if ! chain_has_comment "$family" "nfwd docker compat established"; then
-    printf 'insert rule %s filter FORWARD ct state established,related counter accept comment "nfwd docker compat established"\n' "$family" >>"$tmp"
-  fi
-
-  if ! chain_has_comment "$family" "nfwd docker compat dnat"; then
-    printf 'insert rule %s filter FORWARD ct status dnat counter accept comment "nfwd docker compat dnat"\n' "$family" >>"$tmp"
-  fi
-
+  {
+    printf '#!/usr/sbin/nft -f\n'
+    printf 'chain %s filter FORWARD { policy accept ; }\n' "$family"
+  } >"$tmp"
   "$NFT_BIN" -f "$tmp" || true
   rm -f "$tmp"
 }
