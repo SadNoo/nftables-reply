@@ -313,7 +313,7 @@ remove_rule() {
 
 show_active_rules() {
   clear || true
-  info "当前 nftables 规则"
+  info "当前iptables配置"
   printf '\n'
   if ! "$NFT_BIN" list table ip "$NFT_TABLE"; then
     yellow "当前没有 $NFT_TABLE 表，可能尚未应用配置。"
@@ -323,7 +323,7 @@ show_active_rules() {
 
 show_local_config() {
   clear || true
-  info "当前本地配置：$CONFIG_FILE"
+  info "所有转发规则"
   printf '\n'
   nl -ba "$CONFIG_FILE"
   pause
@@ -387,35 +387,16 @@ apply_docker_compat() {
 menu() {
   while true; do
     clear || true
-    info "$APP_NAME"
-    info "配置文件：$CONFIG_FILE"
-    info "nftables 表：ip $NFT_TABLE"
-    printf '\n'
-    info "1) 增加规则"
-    info "2) 删减规则"
-    info "3) 当前规则"
-    info "4) 当前本地配置"
-    info "5) 编辑本地配置"
-    info "6) 重新应用本地配置"
-    info "0) 退出"
-    printf '\n'
-    read -rp "请选择: " choice
+    info "你要做什么呢（请输入数字）？Ctrl+C 退出本脚本"
+    info "1）增加转发规则              3）列出所有转发规则"
+    info "2）删除转发规则              4）查看当前iptables配置"
+    read -rp "#? " choice
 
     case "$choice" in
       1) add_rule ;;
       2) remove_rule ;;
-      3) show_active_rules ;;
-      4) show_local_config ;;
-      5) edit_local_config ;;
-      6)
-        if apply_config; then
-          green "已重新应用本地配置。"
-        else
-          red "应用失败，请检查本地配置。"
-        fi
-        pause
-        ;;
-      0) exit 0 ;;
+      3) show_local_config ;;
+      4) show_active_rules ;;
       *) yellow "无效选择"; pause ;;
     esac
   done
@@ -428,12 +409,10 @@ main() {
   enable_forwarding
   apply_docker_compat
 
-  if apply_config; then
-    green "已加载本地配置。"
-  else
+  if ! apply_config; then
     yellow "本地配置加载失败，请进入菜单检查配置。"
+    pause
   fi
-  sleep 1
   menu
 }
 
