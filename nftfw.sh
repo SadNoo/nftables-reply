@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-APP_NAME="nft-forward-manager"
+APP_NAME="nftfw"
 CONFIG_DIR="${NFWD_CONFIG_DIR:-/etc/nft-forward-manager}"
 CONFIG_FILE="${NFWD_CONFIG_FILE:-$CONFIG_DIR/rules.conf}"
 SYSCTL_FILE="${NFWD_SYSCTL_FILE:-/etc/sysctl.d/99-nft-forward-manager.conf}"
 NFT_BIN="${NFWD_NFT_BIN:-/usr/sbin/nft}"
 NFT_TABLE="${NFWD_NFT_TABLE:-nfwd_nat}"
-MANAGER_BIN="${NFWD_MANAGER_BIN:-/usr/local/sbin/nft-forward-manager}"
-SERVICE_FILE="${NFWD_SERVICE_FILE:-/etc/systemd/system/nft-forward-manager-restore.service}"
+MANAGER_BIN="${NFWD_MANAGER_BIN:-/usr/local/sbin/nftfw}"
+SERVICE_NAME="${NFWD_SERVICE_NAME:-nftfw-restore.service}"
+SERVICE_FILE="${NFWD_SERVICE_FILE:-/etc/systemd/system/$SERVICE_NAME}"
 
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -66,13 +67,15 @@ init_config() {
 # 字段说明：
 # protocol    : tcp / udp / all，菜单新增默认 all
 # local_port  : 客户端访问中转机 A 的对外端口，支持单端口或端口段，例如 2222 或 20000-20100
-# remote_addr : 后端 B 服务器 IPv4 地址或可解析域名
+# remote_addr : 后端 B 服务器 IPv4/IPv6 地址或可解析域名
 # remote_port : 后端 B 服务器实际服务端口，支持单端口或端口段
 # snat        : on / off；默认 on，on 表示 B 看到来源为 A；off 需要 B 的回程路由经过 A
 # comment     : 可选备注
 #
 # 示例：
 # all|20000-20100|203.0.113.10|20000-20100|on|game udp/tcp range
+# all|20000-20100|2001:db8::10|20000-20100|on|game ipv6
+# all|20000-20100|example.com|20000-20100|on|game domain
 # tcp|2222|203.0.113.10|22|on|ssh
 EOF
   fi
@@ -80,6 +83,12 @@ EOF
 
 install_persistence() {
   local source_path="${BASH_SOURCE[0]:-}"
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now nft-forward-manager-restore.service >/dev/null 2>&1 || true
+  fi
+  rm -f /etc/systemd/system/nft-forward-manager-restore.service
+  rm -f /usr/local/sbin/nft-forward-manager
 
   if [[ -n "$source_path" && -r "$source_path" && "$source_path" != "$MANAGER_BIN" ]]; then
     mkdir -p "$(dirname "$MANAGER_BIN")"
@@ -90,7 +99,7 @@ install_persistence() {
   if command -v systemctl >/dev/null 2>&1 && [[ -x "$MANAGER_BIN" ]]; then
     cat >"$SERVICE_FILE" <<EOF
 [Unit]
-Description=nft-forward-manager restore
+Description=nftfw restore
 After=network-online.target nftables.service docker.service
 Wants=network-online.target
 
@@ -103,14 +112,16 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl enable nft-forward-manager-restore.service >/dev/null 2>&1 || true
+    systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
   fi
 }
 
 enable_forwarding() {
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
+  sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
   cat >"$SYSCTL_FILE" <<'EOF'
 net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
 EOF
 }
 
@@ -143,7 +154,14 @@ validate_snat() {
   esac
 }
 
-resolve_ipv4() {
+strip_ipv6_brackets() {
+  local host="$1"
+  host="${host#[}"
+  host="${host%]}"
+  printf '%s\n' "$host"
+}
+
+is_ipv4_literal() {
   local host="$1"
   if [[ "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
     local IFS=. octets
@@ -151,11 +169,52 @@ resolve_ipv4() {
     for octet in "${octets[@]}"; do
       [[ "$octet" =~ ^[0-9]+$ ]] && (( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
     done
+    return 0
+  fi
+  return 1
+}
+
+is_ipv6_literal() {
+  local host
+  host="$(strip_ipv6_brackets "$1")"
+  [[ "$host" == *:* ]]
+}
+
+resolve_ipv4() {
+  local host
+  host="$(strip_ipv6_brackets "$1")"
+
+  if is_ipv4_literal "$host"; then
     printf '%s\n' "$host"
     return 0
   fi
 
-  getent ahostsv4 "$host" | awk 'NR == 1 { print $1 }'
+  command -v getent >/dev/null 2>&1 || return 0
+  getent ahostsv4 "$host" | awk '$1 ~ /^[0-9.]+$/ { print $1; exit }'
+}
+
+resolve_ipv6() {
+  local host
+  host="$(strip_ipv6_brackets "$1")"
+
+  if is_ipv6_literal "$host"; then
+    printf '%s\n' "$host"
+    return 0
+  fi
+
+  command -v getent >/dev/null 2>&1 || return 0
+  getent ahostsv6 "$host" | awk '$1 ~ /:/ { print $1; exit }'
+}
+
+resolve_targets() {
+  local host="$1" ip
+  while IFS= read -r ip; do
+    [[ -n "$ip" ]] && printf 'ip|%s\n' "$ip"
+  done < <(resolve_ipv4 "$host" || true)
+
+  while IFS= read -r ip; do
+    [[ -n "$ip" ]] && printf 'ip6|%s\n' "$ip"
+  done < <(resolve_ipv6 "$host" || true)
 }
 
 escape_comment() {
@@ -172,7 +231,7 @@ protocols_for_rule() {
 
 generate_nft_script() {
   local table_name="${1:-$NFT_TABLE}"
-  local line proto local_port remote_addr remote_port snat comment target_ip p safe_comment
+  local line proto local_port remote_addr remote_port snat comment family target_ip p safe_comment target
 
   cat <<EOF
 #!/usr/sbin/nft -f
@@ -180,6 +239,10 @@ generate_nft_script() {
 add table ip $table_name
 add chain ip $table_name prerouting { type nat hook prerouting priority dstnat; policy accept; }
 add chain ip $table_name postrouting { type nat hook postrouting priority srcnat; policy accept; }
+
+add table ip6 $table_name
+add chain ip6 $table_name prerouting { type nat hook prerouting priority dstnat; policy accept; }
+add chain ip6 $table_name postrouting { type nat hook postrouting priority srcnat; policy accept; }
 
 EOF
 
@@ -200,22 +263,30 @@ EOF
       continue
     fi
 
-    target_ip="$(resolve_ipv4 "$remote_addr" || true)"
-    if [[ -z "$target_ip" ]]; then
+    if [[ -z "$(resolve_targets "$remote_addr" || true)" ]]; then
       yellow "跳过无法解析的远程地址：$remote_addr" >&2
       continue
     fi
 
     safe_comment="$(escape_comment "${comment:-$local_port->$remote_addr:$remote_port}")"
-    while IFS= read -r p; do
-      [[ -z "$p" ]] && continue
-      printf 'add rule ip %s prerouting %s dport %s counter dnat to %s:%s comment "nfwd:%s"\n' \
-        "$table_name" "$p" "$local_port" "$target_ip" "$remote_port" "$safe_comment"
-      if [[ "$snat" == "on" || "$snat" == "true" || "$snat" == "yes" || "$snat" == "1" ]]; then
-        printf 'add rule ip %s postrouting ip daddr %s %s dport %s counter masquerade comment "nfwd:%s"\n' \
-          "$table_name" "$target_ip" "$p" "$remote_port" "$safe_comment"
+    while IFS='|' read -r family target_ip; do
+      [[ -z "$family" || -z "$target_ip" ]] && continue
+      if [[ "$family" == "ip6" ]]; then
+        target="[$target_ip]:$remote_port"
+      else
+        target="$target_ip:$remote_port"
       fi
-    done < <(protocols_for_rule "$proto")
+
+      while IFS= read -r p; do
+        [[ -z "$p" ]] && continue
+        printf 'add rule %s %s prerouting %s dport %s counter dnat to %s comment "nfwd:%s"\n' \
+          "$family" "$table_name" "$p" "$local_port" "$target" "$safe_comment"
+        if [[ "$snat" == "on" || "$snat" == "true" || "$snat" == "yes" || "$snat" == "1" ]]; then
+          printf 'add rule %s %s postrouting %s daddr %s %s dport %s counter masquerade comment "nfwd:%s"\n' \
+            "$family" "$table_name" "$family" "$target_ip" "$p" "$remote_port" "$safe_comment"
+        fi
+      done < <(protocols_for_rule "$proto")
+    done < <(resolve_targets "$remote_addr")
     printf '\n'
   done <"$CONFIG_FILE"
 }
@@ -236,6 +307,9 @@ apply_config() {
   generate_nft_script "$NFT_TABLE" >"$tmp"
   if "$NFT_BIN" list table ip "$NFT_TABLE" >/dev/null 2>&1; then
     "$NFT_BIN" delete table ip "$NFT_TABLE"
+  fi
+  if "$NFT_BIN" list table ip6 "$NFT_TABLE" >/dev/null 2>&1; then
+    "$NFT_BIN" delete table ip6 "$NFT_TABLE"
   fi
 
   "$NFT_BIN" -f "$tmp"
@@ -289,8 +363,8 @@ validate_config_syntax() {
       red "第 $lineno 行端口无效：$line" >&2
       return 1
     fi
-    if [[ -z "$(resolve_ipv4 "$remote_addr" || true)" ]]; then
-      red "第 $lineno 行远程地址无法解析为 IPv4：$line" >&2
+    if [[ -z "$(resolve_targets "$remote_addr" || true)" ]]; then
+      red "第 $lineno 行远程地址无法解析为 IPv4/IPv6：$line" >&2
       return 1
     fi
     if ! validate_snat "$snat"; then
@@ -365,7 +439,7 @@ add_rule() {
   info "增加规则"
   info "本地端口：客户端访问中转机 A 的对外端口，例如 2222 或 20000-20100"
   info "远程端口：后端 B 服务器实际服务端口，例如 22 或 20000-20100"
-  info "远程地址：后端 B 服务器 IPv4 地址或域名"
+  info "远程地址：后端 B 服务器 IPv4/IPv6 地址或域名"
   info "默认开启 SNAT，后端 B 会看到来源为 A，这样通常不需要改 B 的回程路由。"
   printf '\n'
 
@@ -376,7 +450,7 @@ add_rule() {
   valid_port_token "$remote_port" || { red "端口格式无效"; return; }
 
   read -rp "请输入远程地址: " remote_addr
-  [[ -n "$(resolve_ipv4 "$remote_addr" || true)" ]] || { red "远程地址无法解析为 IPv4"; return; }
+  [[ -n "$(resolve_targets "$remote_addr" || true)" ]] || { red "远程地址无法解析为 IPv4/IPv6"; return; }
 
   read -rp "请输入备注（可留空）: " comment
   read -rp "是否开启 SNAT？[Y/n]: " snat_choice
@@ -450,15 +524,22 @@ diagnose_forwarding() {
   sysctl net.ipv4.ip_forward 2>/dev/null || true
   printf '\n'
 
+  info "IPv6 转发开关："
+  sysctl net.ipv6.conf.all.forwarding 2>/dev/null || true
+  printf '\n'
+
   info "本脚本 nftables NAT 表："
   if ! "$NFT_BIN" list table ip "$NFT_TABLE"; then
     yellow "当前没有 ip $NFT_TABLE 表。"
   fi
+  "$NFT_BIN" list table ip6 "$NFT_TABLE" 2>/dev/null || yellow "当前没有 ip6 $NFT_TABLE 表。"
   printf '\n'
 
   info "常见 forward 链："
   "$NFT_BIN" list chain ip filter FORWARD 2>/dev/null || true
   "$NFT_BIN" list chain ip filter forward 2>/dev/null || true
+  "$NFT_BIN" list chain ip6 filter FORWARD 2>/dev/null || true
+  "$NFT_BIN" list chain ip6 filter forward 2>/dev/null || true
   "$NFT_BIN" list chain inet filter FORWARD 2>/dev/null || true
   "$NFT_BIN" list chain inet filter forward 2>/dev/null || true
   printf '\n'

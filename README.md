@@ -5,7 +5,7 @@ Debian 11+ nftables 端口转发交互管理脚本。
 ## 快速启动
 
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/SadNoo/nftables-reply/main/nft-forward-manager.sh)
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/SadNoo/nftables-reply/main/nftfw.sh)
 ```
 
 首次运行时，如果 Debian/Ubuntu 没有安装 `nftables`，脚本会自动执行：
@@ -19,19 +19,19 @@ systemctl enable --now nftables
 脚本会自动安装到：
 
 ```text
-/usr/local/sbin/nft-forward-manager
+/usr/local/sbin/nftfw
 ```
 
 并创建开机恢复服务：
 
 ```text
-/etc/systemd/system/nft-forward-manager-restore.service
+/etc/systemd/system/nftfw-restore.service
 ```
 
 服务器重启后会自动执行：
 
 ```bash
-/usr/local/sbin/nft-forward-manager --apply-only
+/usr/local/sbin/nftfw --apply-only
 ```
 
 从 `/etc/nft-forward-manager/rules.conf` 恢复转发规则。
@@ -45,8 +45,11 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/SadNoo/nftables-reply/m
 卸载脚本会删除：
 
 - systemd 服务：`/etc/systemd/system/nft-forward-manager-restore.service`
-- 本地脚本：`/usr/local/sbin/nft-forward-manager`
+- systemd 服务：`/etc/systemd/system/nftfw-restore.service`
+- 旧本地脚本：`/usr/local/sbin/nft-forward-manager`
+- 本地脚本：`/usr/local/sbin/nftfw`
 - nftables 表：`ip nfwd_nat`
+- nftables 表：`ip6 nfwd_nat`
 - 本地配置目录：`/etc/nft-forward-manager`
 - sysctl 配置：`/etc/sysctl.d/99-nft-forward-manager.conf`
 
@@ -60,6 +63,7 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/SadNoo/nftables-reply/m
 - 查看当前 nftables 配置
 - 编辑本地配置并导入
 - 开机自动恢复转发规则
+- 支持 IPv4、IPv6、域名 A/AAAA 记录解析
 - 默认 `snat=on`，优先保证直接可用；需要保留客户端源 IP 时可改为 `off`
 - 检测 Docker/iptables-nft 的 `FORWARD policy drop` 并改为 `policy accept` 以兼容 NAT 转发
 - 转发诊断，查看 `ip_forward`、nftables NAT 表和 counter
@@ -96,6 +100,7 @@ lsof -i:端口
 
 ```bash
 nft list table ip nfwd_nat
+nft list table ip6 nfwd_nat
 ```
 
 从外部客户端访问中转机 A 的本地端口后，看对应规则的 `counter` 是否增加。
@@ -115,7 +120,7 @@ protocol|local_port|remote_addr|remote_port|snat|comment
 字段含义：
 
 - `local_port`：客户端访问中转机 A 的对外端口
-- `remote_addr`：后端 B 服务器 IPv4 地址或域名
+- `remote_addr`：后端 B 服务器 IPv4/IPv6 地址或域名
 - `remote_port`：后端 B 服务器实际服务端口
 - `snat`：`on` 让 B 看到来源为 A，通常直接可用；`off` 保留真实客户端 IP，但要求 B 的回程路由经过 A
 
@@ -123,5 +128,9 @@ protocol|local_port|remote_addr|remote_port|snat|comment
 
 ```text
 all|20000-20100|203.0.113.10|20000-20100|on|game range
+all|20000-20100|2001:db8::10|20000-20100|on|game ipv6
+all|20000-20100|example.com|20000-20100|on|game domain
 tcp|2222|203.0.113.10|22|on|ssh
 ```
+
+域名会自动解析 A 和 AAAA 记录：A 记录生成 IPv4 转发，AAAA 记录生成 IPv6 转发。
