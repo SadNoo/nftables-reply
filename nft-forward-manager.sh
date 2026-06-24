@@ -31,8 +31,26 @@ require_root() {
 
 require_nftables() {
   if [[ ! -x "$NFT_BIN" ]]; then
-    die "未找到 $NFT_BIN。Debian/Ubuntu 可先执行：apt update && apt install -y nftables"
+    install_nftables
   fi
+
+  if [[ ! -x "$NFT_BIN" ]]; then
+    die "未找到 $NFT_BIN，且自动安装失败。请手动执行：apt update && apt install -y nftables"
+  fi
+}
+
+install_nftables() {
+  if [[ -f /etc/debian_version ]] && command -v apt-get >/dev/null 2>&1; then
+    yellow "未检测到 nftables，正在自动安装依赖环境..."
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y nftables
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl enable --now nftables >/dev/null 2>&1 || true
+    fi
+    return
+  fi
+
+  die "未检测到 nftables，当前系统不支持自动安装。Debian/Ubuntu 可执行：apt update && apt install -y nftables"
 }
 
 init_config() {
@@ -256,13 +274,13 @@ add_rule() {
   printf '\n'
 
   read -rp "请输入本地端口: " local_port
-  valid_port_token "$local_port" || { red "端口格式无效"; pause; return; }
+  valid_port_token "$local_port" || { red "端口格式无效"; return; }
 
   read -rp "请输入远程端口: " remote_port
-  valid_port_token "$remote_port" || { red "端口格式无效"; pause; return; }
+  valid_port_token "$remote_port" || { red "端口格式无效"; return; }
 
   read -rp "请输入远程地址: " remote_addr
-  [[ -n "$(resolve_ipv4 "$remote_addr" || true)" ]] || { red "远程地址无法解析为 IPv4"; pause; return; }
+  [[ -n "$(resolve_ipv4 "$remote_addr" || true)" ]] || { red "远程地址无法解析为 IPv4"; return; }
 
   read -rp "请输入备注（可留空）: " comment
 
@@ -279,7 +297,6 @@ add_rule() {
   else
     red "配置已写入，但应用 nftables 失败，请检查配置。"
   fi
-  pause
 }
 
 remove_rule() {
@@ -291,7 +308,7 @@ remove_rule() {
   printf '\n'
 
   read -rp "请输入端口: " port
-  valid_port_token "$port" || { red "端口格式无效"; pause; return; }
+  valid_port_token "$port" || { red "端口格式无效"; return; }
 
   if delete_by_port "$port" local; then
     if apply_config; then
@@ -308,44 +325,39 @@ remove_rule() {
   else
     yellow "未找到端口 $port 对应的本地配置。"
   fi
-  pause
 }
 
-show_active_rules() {
-  clear || true
-  info "当前iptables配置"
-  printf '\n'
-  if ! "$NFT_BIN" list table ip "$NFT_TABLE"; then
-    yellow "当前没有 $NFT_TABLE 表，可能尚未应用配置。"
-  fi
-  pause
-}
-
-show_local_config() {
-  clear || true
+list_forward_rules() {
   info "所有转发规则"
   printf '\n'
   nl -ba "$CONFIG_FILE"
-  pause
+}
+
+show_current_nftables_config() {
+  info "当前nftables配置（可复制后粘贴到第5项导入）"
+  printf '\n'
+  cat "$CONFIG_FILE"
 }
 
 edit_local_config() {
-  local editor="${EDITOR:-}"
-  if [[ -z "$editor" ]]; then
-    if command -v nano >/dev/null 2>&1; then
-      editor="nano"
-    else
-      editor="vi"
-    fi
-  fi
+  local tmp line
+  tmp="$(mktemp)"
+  info "编辑本地配置"
+  info "请直接粘贴完整配置，单独输入 EOF 结束并应用。"
+  info "格式：protocol|local_port|remote_addr|remote_port|snat|comment"
+  printf '\n'
 
-  "$editor" "$CONFIG_FILE"
+  while IFS= read -r line; do
+    [[ "$line" == "EOF" ]] && break
+    printf '%s\n' "$line" >>"$tmp"
+  done
+
+  mv "$tmp" "$CONFIG_FILE"
   if apply_config; then
     green "配置已重新应用。"
   else
     red "配置应用失败，请检查 $CONFIG_FILE。"
   fi
-  pause
 }
 
 forward_policy_is_drop() {
@@ -375,18 +387,20 @@ apply_docker_compat() {
 
 menu() {
   while true; do
-    clear || true
+    printf '\n'
     info "你要做什么呢（请输入数字）？Ctrl+C 退出本脚本"
     info "1）增加转发规则              3）列出所有转发规则"
-    info "2）删除转发规则              4）查看当前iptables配置"
+    info "2）删除转发规则              4）查看当前nftables配置"
+    info "5）编辑本地配置"
     read -rp "#? " choice
 
     case "$choice" in
       1) add_rule ;;
       2) remove_rule ;;
-      3) show_local_config ;;
-      4) show_active_rules ;;
-      *) yellow "无效选择"; pause ;;
+      3) list_forward_rules ;;
+      4) show_current_nftables_config ;;
+      5) edit_local_config ;;
+      *) yellow "无效选择" ;;
     esac
   done
 }
@@ -400,7 +414,6 @@ main() {
 
   if ! apply_config; then
     yellow "本地配置加载失败，请进入菜单检查配置。"
-    pause
   fi
   menu
 }

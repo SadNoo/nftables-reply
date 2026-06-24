@@ -8,6 +8,14 @@ Debian 11+ nftables 端口转发交互管理脚本。
 sudo bash <(curl -fsSL https://raw.githubusercontent.com/SadNoo/nftables-reply/main/nft-forward-manager.sh)
 ```
 
+首次运行时，如果 Debian/Ubuntu 没有安装 `nftables`，脚本会自动执行：
+
+```bash
+apt-get update
+apt-get install -y nftables
+systemctl enable --now nftables
+```
+
 ## 卸载
 
 ```bash
@@ -26,12 +34,29 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/SadNoo/nftables-reply/m
 
 - 增加规则
 - 删减规则
-- 查看当前 nftables 规则
-- 查看当前本地配置
-- 编辑本地配置
-- 重新应用本地配置
+- 列出所有转发规则
+- 查看当前 nftables 配置
+- 编辑本地配置并导入
 - 默认 `snat=off`，保留客户端源 IP
 - 检测 Docker/iptables-nft 的 `FORWARD policy drop` 并改为 `policy accept` 以兼容 NAT 转发
+
+## 菜单
+
+```text
+你要做什么呢（请输入数字）？Ctrl+C 退出本脚本
+1）增加转发规则              3）列出所有转发规则
+2）删除转发规则              4）查看当前nftables配置
+5）编辑本地配置
+#?
+```
+
+第 4 项输出的是可复制的本地配置内容。复制后可以进入第 5 项直接粘贴导入，最后单独输入一行：
+
+```text
+EOF
+```
+
+脚本会立即应用新配置。
 
 ## 配置位置
 
