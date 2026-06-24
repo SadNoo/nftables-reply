@@ -66,12 +66,12 @@ init_config() {
 # local_port  : 客户端访问中转机 A 的对外端口，支持单端口或端口段，例如 2222 或 20000-20100
 # remote_addr : 后端 B 服务器 IPv4 地址或可解析域名
 # remote_port : 后端 B 服务器实际服务端口，支持单端口或端口段
-# snat        : on / off；默认 off，off 表示保留客户端源 IP，需要 B 的回程路由经过 A
+# snat        : on / off；默认 on，on 表示 B 看到来源为 A；off 需要 B 的回程路由经过 A
 # comment     : 可选备注
 #
 # 示例：
-# all|20000-20100|203.0.113.10|20000-20100|off|game udp/tcp range
-# tcp|2222|203.0.113.10|22|off|ssh
+# all|20000-20100|203.0.113.10|20000-20100|on|game udp/tcp range
+# tcp|2222|203.0.113.10|22|on|ssh
 EOF
   fi
 }
@@ -150,7 +150,7 @@ EOF
 
     IFS='|' read -r proto local_port remote_addr remote_port snat comment <<<"$line"
     proto="${proto:-all}"
-    snat="${snat:-off}"
+    snat="${snat:-on}"
     comment="${comment:-}"
 
     if ! validate_protocol "$proto"; then
@@ -263,14 +263,14 @@ delete_by_port() {
 }
 
 add_rule() {
-  local local_port remote_port remote_addr comment line
+  local local_port remote_port remote_addr comment line snat_choice snat
 
   clear || true
   info "增加规则"
   info "本地端口：客户端访问中转机 A 的对外端口，例如 2222 或 20000-20100"
   info "远程端口：后端 B 服务器实际服务端口，例如 22 或 20000-20100"
   info "远程地址：后端 B 服务器 IPv4 地址或域名"
-  info "默认不做 SNAT，后端 B 会看到真实客户端源 IP；这要求 B 的回程路由经过 A。"
+  info "默认开启 SNAT，后端 B 会看到来源为 A，这样通常不需要改 B 的回程路由。"
   printf '\n'
 
   read -rp "请输入本地端口: " local_port
@@ -283,13 +283,18 @@ add_rule() {
   [[ -n "$(resolve_ipv4 "$remote_addr" || true)" ]] || { red "远程地址无法解析为 IPv4"; return; }
 
   read -rp "请输入备注（可留空）: " comment
+  read -rp "是否开启 SNAT？[Y/n]: " snat_choice
+  case "${snat_choice,,}" in
+    n|no) snat="off" ;;
+    *) snat="on" ;;
+  esac
 
   if local_port_exists "$local_port"; then
     yellow "本地端口 $local_port 已存在，将覆盖旧配置。"
     delete_by_port "$local_port" local || true
   fi
 
-  line="all|$local_port|$remote_addr|$remote_port|off|$comment"
+  line="all|$local_port|$remote_addr|$remote_port|$snat|$comment"
   printf '%s\n' "$line" >>"$CONFIG_FILE"
 
   if apply_config; then
@@ -339,6 +344,32 @@ show_current_nftables_config() {
   cat "$CONFIG_FILE"
 }
 
+diagnose_forwarding() {
+  info "转发诊断"
+  printf '\n'
+  info "说明：nftables DNAT 是内核转发，不会创建监听进程，所以 lsof -i:端口 没有结果是正常的。"
+  printf '\n'
+
+  info "IPv4 转发开关："
+  sysctl net.ipv4.ip_forward 2>/dev/null || true
+  printf '\n'
+
+  info "本脚本 nftables NAT 表："
+  if ! "$NFT_BIN" list table ip "$NFT_TABLE"; then
+    yellow "当前没有 ip $NFT_TABLE 表。"
+  fi
+  printf '\n'
+
+  info "常见 forward 链："
+  "$NFT_BIN" list chain ip filter FORWARD 2>/dev/null || true
+  "$NFT_BIN" list chain ip filter forward 2>/dev/null || true
+  "$NFT_BIN" list chain inet filter FORWARD 2>/dev/null || true
+  "$NFT_BIN" list chain inet filter forward 2>/dev/null || true
+  printf '\n'
+
+  info "排查建议：从外部客户端访问 A 的本地端口后，再看上面 nfwd_nat 规则 counter 是否增加。"
+}
+
 edit_local_config() {
   local tmp line
   tmp="$(mktemp)"
@@ -361,28 +392,50 @@ edit_local_config() {
 }
 
 forward_policy_is_drop() {
-  local family="$1" chain
-  chain="$("$NFT_BIN" list chain "$family" filter FORWARD 2>/dev/null || true)"
+  local family="$1" table="$2" chain_name="$3" chain
+  chain="$("$NFT_BIN" list chain "$family" "$table" "$chain_name" 2>/dev/null || true)"
   [[ "$chain" == *"hook forward"* && "$chain" == *"policy drop"* ]]
 }
 
-apply_docker_compat_for_family() {
-  local family="$1" tmp
-  forward_policy_is_drop "$family" || return 0
+forward_chain_exists() {
+  local family="$1" table="$2" chain_name="$3"
+  "$NFT_BIN" list chain "$family" "$table" "$chain_name" >/dev/null 2>&1
+}
 
-  yellow "检测到 $family filter FORWARD 为 policy drop，正在修改为 policy accept 以兼容 Docker/nftables NAT 转发。"
+forward_chain_has() {
+  local family="$1" table="$2" chain_name="$3" pattern="$4"
+  "$NFT_BIN" list chain "$family" "$table" "$chain_name" 2>/dev/null | grep -Fq "$pattern"
+}
+
+apply_forward_accept() {
+  local family="$1" table="$2" chain_name="$3" tmp
+  forward_chain_exists "$family" "$table" "$chain_name" || return 0
+
+  yellow "正在兼容 $family $table $chain_name 的 NAT 转发放行规则。"
   tmp="$(mktemp)"
   {
     printf '#!/usr/sbin/nft -f\n'
-    printf 'chain %s filter FORWARD { policy accept ; }\n' "$family"
+    if ! forward_chain_has "$family" "$table" "$chain_name" "ct state established,related"; then
+      printf 'insert rule %s %s %s ct state established,related counter accept\n' "$family" "$table" "$chain_name"
+    fi
+    if ! forward_chain_has "$family" "$table" "$chain_name" "ct status dnat"; then
+      printf 'insert rule %s %s %s ct status dnat counter accept\n' "$family" "$table" "$chain_name"
+    fi
+    if forward_policy_is_drop "$family" "$table" "$chain_name"; then
+      printf 'chain %s %s %s { policy accept ; }\n' "$family" "$table" "$chain_name"
+    fi
   } >"$tmp"
   "$NFT_BIN" -f "$tmp" || true
   rm -f "$tmp"
 }
 
 apply_docker_compat() {
-  apply_docker_compat_for_family ip
-  apply_docker_compat_for_family ip6
+  apply_forward_accept ip filter FORWARD
+  apply_forward_accept ip filter forward
+  apply_forward_accept ip6 filter FORWARD
+  apply_forward_accept ip6 filter forward
+  apply_forward_accept inet filter FORWARD
+  apply_forward_accept inet filter forward
 }
 
 menu() {
@@ -391,7 +444,7 @@ menu() {
     info "你要做什么呢（请输入数字）？Ctrl+C 退出本脚本"
     info "1）增加转发规则              3）列出所有转发规则"
     info "2）删除转发规则              4）查看当前nftables配置"
-    info "5）编辑本地配置"
+    info "5）编辑本地配置              6）转发诊断"
     read -rp "#? " choice
 
     case "$choice" in
@@ -400,6 +453,7 @@ menu() {
       3) list_forward_rules ;;
       4) show_current_nftables_config ;;
       5) edit_local_config ;;
+      6) diagnose_forwarding ;;
       *) yellow "无效选择" ;;
     esac
   done

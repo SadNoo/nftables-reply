@@ -49,34 +49,38 @@ remove_sysctl_file() {
 }
 
 forward_policy_is_accept() {
-  local family="$1" chain
+  local family="$1" table="$2" chain_name="$3" chain
   [[ -x "$NFT_BIN" ]] || return 1
-  chain="$("$NFT_BIN" list chain "$family" filter FORWARD 2>/dev/null || true)"
+  chain="$("$NFT_BIN" list chain "$family" "$table" "$chain_name" 2>/dev/null || true)"
   [[ "$chain" == *"hook forward"* && "$chain" == *"policy accept"* ]]
 }
 
-restore_forward_drop_for_family() {
-  local family="$1" tmp
-  forward_policy_is_accept "$family" || return 0
+restore_forward_drop() {
+  local family="$1" table="$2" chain_name="$3" tmp
+  forward_policy_is_accept "$family" "$table" "$chain_name" || return 0
   tmp="$(mktemp)"
   {
     printf '#!/usr/sbin/nft -f\n'
-    printf 'chain %s filter FORWARD { policy drop ; }\n' "$family"
+    printf 'chain %s %s %s { policy drop ; }\n' "$family" "$table" "$chain_name"
   } >"$tmp"
   "$NFT_BIN" -f "$tmp" || true
   rm -f "$tmp"
-  green "已将 $family filter FORWARD policy 改回 drop"
+  green "已将 $family $table $chain_name policy 改回 drop"
 }
 
 maybe_restore_forward_policy() {
   printf '\n'
   yellow "提示：安装脚本可能曾为 Docker/nftables NAT 兼容把 FORWARD policy 改为 accept。"
   yellow "如果你不确定，建议选择 n，避免影响 Docker 或其它转发流量。"
-  read -rp "是否尝试将 ip/ip6 filter FORWARD policy 改回 drop？[y/N]: " answer
+  read -rp "是否尝试将常见 forward 链 policy 改回 drop？[y/N]: " answer
   case "${answer,,}" in
     y|yes)
-      restore_forward_drop_for_family ip
-      restore_forward_drop_for_family ip6
+      restore_forward_drop ip filter FORWARD
+      restore_forward_drop ip filter forward
+      restore_forward_drop ip6 filter FORWARD
+      restore_forward_drop ip6 filter forward
+      restore_forward_drop inet filter FORWARD
+      restore_forward_drop inet filter forward
       ;;
     *)
       yellow "已跳过 FORWARD policy 恢复。"
